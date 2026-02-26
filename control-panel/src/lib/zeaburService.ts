@@ -47,19 +47,18 @@ export async function listAgentServices(bustCache = false): Promise<AgentService
   }
 
   const data = await gql<{
-    services: { _id: string; name: string; status: string }[];
+    services: { edges: { node: { _id: string; name: string; status: string } }[] };
   }>(
     `query ($projectId: ObjectID!, $environmentId: ObjectID!) {
-      services: listServices(projectID: $projectId) {
-        _id
-        name
-        status(environmentID: $environmentId)
+      services(projectID: $projectId) {
+        edges { node { _id name status(environmentID: $environmentId) } }
       }
     }`,
     { projectId: getProjectId(), environmentId: getEnvironmentId() }
   );
 
-  const agents: AgentServiceInfo[] = data.services
+  const agents: AgentServiceInfo[] = data.services.edges
+    .map((e) => e.node)
     .filter((s) => s.name.startsWith("OpenClaw-"))
     .map((s) => ({
       serviceId: s._id,
@@ -81,7 +80,7 @@ export async function getServiceDetails(serviceId: string) {
     service: { _id: string; name: string; status: string; domains: { domain: string }[] };
   }>(
     `query ($serviceId: ObjectID!, $environmentId: ObjectID!) {
-      service: getService(serviceID: $serviceId) {
+      service(_id: $serviceId) {
         _id
         name
         status(environmentID: $environmentId)
@@ -139,9 +138,10 @@ export async function controlService(
       { serviceId, environmentId: getEnvironmentId() }
     );
   } else {
+    // api.zeabur.com has no resumeService — use restartService instead
     await gql(
       `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!) {
-        resumeService(serviceID: $serviceId, environmentID: $environmentId)
+        restartService(serviceID: $serviceId, environmentID: $environmentId)
       }`,
       { serviceId, environmentId: getEnvironmentId() }
     );
@@ -152,18 +152,17 @@ export async function getServiceVariables(
   serviceId: string
 ): Promise<Record<string, string>> {
   const data = await gql<{
-    envs: { key: string; value: string }[];
+    service: { variables: { key: string; value: string }[] };
   }>(
     `query ($serviceId: ObjectID!, $environmentId: ObjectID!) {
-      envs: getServiceVariables(serviceID: $serviceId, environmentID: $environmentId) {
-        key
-        value
+      service(_id: $serviceId) {
+        variables(environmentID: $environmentId) { key value }
       }
     }`,
     { serviceId, environmentId: getEnvironmentId() }
   );
   const map: Record<string, string> = {};
-  for (const e of data.envs) map[e.key] = e.value;
+  for (const e of data.service.variables) map[e.key] = e.value;
   return map;
 }
 
@@ -174,7 +173,9 @@ export async function setServiceVariable(
 ): Promise<void> {
   await gql(
     `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!, $key: String!, $value: String!) {
-      createEnvironmentVariable(serviceID: $serviceId, environmentID: $environmentId, key: $key, value: $value)
+      createEnvironmentVariable(serviceID: $serviceId, environmentID: $environmentId, key: $key, value: $value) {
+        key value
+      }
     }`,
     { serviceId, environmentId: getEnvironmentId(), key, value }
   );
@@ -200,7 +201,7 @@ export async function getRuntimeLogs(serviceId: string): Promise<string> {
     logs: { message: string; timestamp: string }[];
   }>(
     `query ($serviceId: ObjectID!, $environmentId: ObjectID!, $projectId: ObjectID!) {
-      logs: getRuntimeLogs(serviceID: $serviceId, environmentID: $environmentId, projectID: $projectId) {
+      logs: runtimeLogs(serviceID: $serviceId, environmentID: $environmentId, projectID: $projectId) {
         message
         timestamp
       }
