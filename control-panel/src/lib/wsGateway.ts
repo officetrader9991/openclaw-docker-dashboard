@@ -1,6 +1,15 @@
-import { WebSocket } from "ws";
 import crypto from "crypto";
 import { getInternalUrl } from "./zeaburService";
+
+// Dynamic import to avoid Next.js build-time static analysis issues with native ws module
+let _WebSocket: typeof import("ws").WebSocket | null = null;
+async function getWebSocket() {
+  if (!_WebSocket) {
+    const mod = await import("ws");
+    _WebSocket = mod.WebSocket ?? (mod.default as unknown as typeof import("ws")).WebSocket;
+  }
+  return _WebSocket;
+}
 
 // --- Types ---
 
@@ -16,7 +25,7 @@ interface PendingRequest {
 }
 
 interface PoolEntry {
-  ws: WebSocket;
+  ws: InstanceType<typeof import("ws").WebSocket>;
   ready: boolean;
   lastUsed: number;
   pending: Map<string, PendingRequest>;
@@ -30,6 +39,7 @@ const MAX_POOL_SIZE = 50;
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BACKOFF_MS = 30_000;
+let sweepStarted = false;
 
 function poolKey(serviceId: string, port: number): string {
   return `${serviceId}:${port}`;
@@ -50,7 +60,9 @@ function evictLRU() {
   }
 }
 
-function startIdleSweep() {
+function ensureIdleSweep() {
+  if (sweepStarted) return;
+  sweepStarted = true;
   setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of pool) {
@@ -62,9 +74,7 @@ function startIdleSweep() {
   }, 60_000).unref();
 }
 
-startIdleSweep();
-
-function connectWs(
+async function connectWs(
   serviceId: string,
   port: number,
   token: string
@@ -73,16 +83,18 @@ function connectWs(
   const existing = pool.get(key);
   if (existing?.ready) {
     existing.lastUsed = Date.now();
-    return Promise.resolve(existing);
+    return existing;
   }
   if (existing?.connectPromise) {
     return existing.connectPromise.then(() => pool.get(key)!);
   }
 
   evictLRU();
+  ensureIdleSweep();
 
+  const WS = await getWebSocket();
   const url = `${getInternalUrl(serviceId, port).replace("http", "ws")}/__openclaw__/ws`;
-  const ws = new WebSocket(url);
+  const ws = new WS(url);
   const entry: PoolEntry = {
     ws,
     ready: false,
