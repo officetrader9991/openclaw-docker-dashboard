@@ -1,5 +1,6 @@
 import { exec as execCb } from "child_process";
 import { promisify } from "util";
+import crypto from "crypto";
 import path from "path";
 import type { MessageResult, MessagePayload } from "./types";
 import { isZeabur } from "./fleetMode";
@@ -165,11 +166,6 @@ function requireMeta(agentId: string) {
 async function zeaburSendMessage(
   port: number, token: string, sessionId: string, message: string
 ): Promise<MessageResult> {
-  // Find serviceId from agentMap by matching token+port
-  const { getAgentMeta } = await import("./agentDiscovery");
-  // agentMap is module-level — scan all known agents
-  // We don't have direct access to the map, but getAgentMeta takes agentId.
-  // Instead, fall back to scanning services by resolved token.
   let serviceId: string | null = null;
   const services = await zeabur.listAgentServices();
   for (const svc of services) {
@@ -183,22 +179,54 @@ async function zeaburSendMessage(
   }
   if (!serviceId) throw new Error("Could not find service matching gateway token");
 
-  const result = await sendRequest<{
-    payloads?: { text?: string }[];
-    meta?: { durationMs?: number; agentMeta?: { provider?: string; model?: string } };
-  }>(serviceId, port, token, "chat.send", { sessionId, message }, 120000);
+  // chat.send is async — it returns {runId, status:"started"} immediately.
+  // We need to wait for the chat event with state="final" via a separate WS listener.
+  // Use a second sendRequest call pattern: subscribe to events then send.
+  // For simplicity, use the WS pool directly via a polling approach on chat.history.
+  const idempotencyKey = crypto.randomUUID();
 
-  const rawPayloads = result.payloads ?? [];
-  const meta = result.meta?.agentMeta;
-  const payloads: MessagePayload[] = rawPayloads
-    .filter((p) => p.text?.trim())
-    .map((p, i, arr) => ({ text: p.text!.trim(), isFinal: i === arr.length - 1 }));
-  if (payloads.length === 0) payloads.push({ text: "(no response)", isFinal: true });
+  // Get sessionKey from sessions.list
+  const listResult = await sendRequest<{ sessions?: { key?: string; sessionId?: string }[] }>(
+    serviceId, port, token, "sessions.list"
+  );
+  const sessionKey = (listResult as { sessions?: { key?: string; sessionId?: string }[] }).sessions
+    ?.find((s) => s.sessionId === sessionId || s.key?.endsWith(sessionId))?.key
+    ?? `agent:main:${sessionId}`;
+
+  await sendRequest<{ runId?: string; status?: string }>(
+    serviceId, port, token, "chat.send",
+    { sessionKey, idempotencyKey, message },
+    120000
+  );
+
+  // Poll chat.history until we get a new final message (up to 60s)
+  const start = Date.now();
+  let finalText = "(no response)";
+  while (Date.now() - start < 60000) {
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const hist = await sendRequest<{ payload?: { messages?: { role?: string; content?: { type?: string; text?: string }[] | string }[] } }>(
+        serviceId, port, token, "chat.history", { sessionKey }
+      );
+      const msgs = (hist as { payload?: { messages?: unknown[] }; messages?: unknown[] }).payload?.messages
+        ?? (hist as { messages?: unknown[] }).messages ?? [];
+      const last = [...msgs].reverse().find((m: unknown) => (m as { role?: string }).role === "assistant");
+      if (last) {
+        const content = (last as { content?: unknown }).content;
+        if (typeof content === "string") finalText = content;
+        else if (Array.isArray(content)) {
+          finalText = (content as { type?: string; text?: string }[])
+            .filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+        }
+        if (finalText) break;
+      }
+    } catch { /* retry */ }
+  }
 
   return {
-    payloads,
-    durationMs: result.meta?.durationMs ?? 0,
-    model: meta ? `${meta.provider}/${meta.model}` : "unknown",
+    payloads: [{ text: finalText.trim() || "(no response)", isFinal: true }],
+    durationMs: Date.now() - start,
+    model: "unknown",
   };
 }
 
