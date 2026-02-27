@@ -107,11 +107,13 @@ export async function createAgentService(
 
   const serviceId = data.service._id;
 
-  if (envVars) {
-    await Promise.all(
-      Object.entries(envVars).map(([key, value]) =>
-        setServiceVariable(serviceId, key, value)
-      )
+  if (envVars && Object.keys(envVars).length > 0) {
+    // Use updateEnvironmentVariable with Map to set all vars at once (upsert)
+    await gql(
+      `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!, $data: Map!) {
+        updateEnvironmentVariable(serviceID: $serviceId, environmentID: $environmentId, data: $data)
+      }`,
+      { serviceId, environmentId: getEnvironmentId(), data: envVars }
     );
   }
 
@@ -171,14 +173,29 @@ export async function setServiceVariable(
   key: string,
   value: string
 ): Promise<void> {
-  await gql(
-    `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!, $key: String!, $value: String!) {
-      createEnvironmentVariable(serviceID: $serviceId, environmentID: $environmentId, key: $key, value: $value) {
-        key value
-      }
-    }`,
-    { serviceId, environmentId: getEnvironmentId(), key, value }
-  );
+  try {
+    await gql(
+      `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!, $key: String!, $value: String!) {
+        createEnvironmentVariable(serviceID: $serviceId, environmentID: $environmentId, key: $key, value: $value) {
+          key value
+        }
+      }`,
+      { serviceId, environmentId: getEnvironmentId(), key, value }
+    );
+  } catch (err) {
+    // Variable already exists — update it instead
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("already") || msg.includes("created")) {
+      await gql(
+        `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!, $data: Map!) {
+          updateEnvironmentVariable(serviceID: $serviceId, environmentID: $environmentId, data: $data)
+        }`,
+        { serviceId, environmentId: getEnvironmentId(), data: { [key]: value } }
+      );
+    } else {
+      throw err;
+    }
+  }
 }
 
 export async function executeCommand(
