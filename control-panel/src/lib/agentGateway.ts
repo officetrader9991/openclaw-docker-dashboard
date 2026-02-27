@@ -219,9 +219,12 @@ async function zeaburGetSessionList(agentId: string): Promise<SessionInfo[]> {
   const meta = requireMeta(agentId);
   try {
     const result = await sendRequest<{
-      sessions?: { key?: string; sessionId?: string; updatedAt?: number; model?: string }[];
+      sessions?: { key?: string; sessionId?: string; updatedAt?: number; model?: string; defaults?: { model?: string } }[];
+      defaults?: { model?: string };
     }>(meta.serviceId, meta.port, meta.token, "sessions.list");
-    const sessions: SessionInfo[] = (result.sessions ?? []).map((s) => ({
+    // sessions.list returns payload directly (not wrapped)
+    const raw = (result as { sessions?: unknown[] }).sessions ?? [];
+    const sessions: SessionInfo[] = (raw as { key?: string; sessionId?: string; updatedAt?: number; model?: string }[]).map((s) => ({
       key: s.key ?? "",
       sessionId: s.sessionId ?? "",
       updatedAt: s.updatedAt ?? 0,
@@ -236,21 +239,56 @@ async function zeaburGetSessionList(agentId: string): Promise<SessionInfo[]> {
 
 async function zeaburGetSessionHistory(agentId: string, sessionId: string): Promise<HistoryMessage[]> {
   const meta = requireMeta(agentId);
+
+  // First get the sessionKey from sessions.list so we can use chat.history
+  let sessionKey: string | undefined;
   try {
+    const listResult = await sendRequest<{
+      sessions?: { key?: string; sessionId?: string }[];
+    }>(meta.serviceId, meta.port, meta.token, "sessions.list");
+    sessionKey = listResult.sessions?.find((s) => s.sessionId === sessionId)?.key;
+  } catch { /* fall through */ }
+
+  try {
+    const params = sessionKey ? { sessionKey } : { sessionKey: sessionId };
     const result = await sendRequest<{
+      payload?: {
+        messages?: { role?: string; content?: { type?: string; text?: string }[] | string }[];
+      };
       messages?: { role?: string; text?: string; content?: string }[];
-    }>(meta.serviceId, meta.port, meta.token, "chat.history", { sessionId });
-    return (result.messages ?? [])
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role as "user" | "assistant", text: m.text ?? m.content ?? "" }))
-      .filter((m) => m.text.trim());
+    }>(meta.serviceId, meta.port, meta.token, "chat.history", params);
+
+    // Handle both payload-wrapped and flat response shapes
+    const rawMessages = result.payload?.messages ?? (result as { messages?: unknown[] }).messages ?? [];
+    const messages: HistoryMessage[] = [];
+    for (const m of rawMessages as { role?: string; content?: unknown; text?: string }[]) {
+      if (m.role !== "user" && m.role !== "assistant") continue;
+      let text = "";
+      if (typeof m.content === "string") text = m.content;
+      else if (Array.isArray(m.content)) {
+        text = (m.content as { type?: string; text?: string }[])
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join("\n");
+      } else if (typeof m.text === "string") {
+        text = m.text;
+      }
+      // Strip conversation metadata prefix
+      text = text.replace(/^Conversation info[\s\S]*?```\s*\n/m, "").replace(/^\[.*?\]\s*/, "").trim();
+      if (text) messages.push({ role: m.role as "user" | "assistant", text });
+    }
+    return messages;
   } catch {
-    // Fallback to sessions.preview
+    // Fallback to sessions.preview with keys array
     try {
+      const keys = sessionKey ? [sessionKey] : [sessionId];
       const result = await sendRequest<{
-        messages?: { role?: string; text?: string }[];
-      }>(meta.serviceId, meta.port, meta.token, "sessions.preview", { sessionId });
-      return (result.messages ?? [])
+        payload?: { previews?: { messages?: { role?: string; text?: string }[] }[] };
+        previews?: { messages?: { role?: string; text?: string }[] }[];
+      }>(meta.serviceId, meta.port, meta.token, "sessions.preview", { keys });
+      const previews = result.payload?.previews ?? (result as { previews?: unknown[] }).previews ?? [];
+      const msgs = (previews as { messages?: { role?: string; text?: string }[] }[])[0]?.messages ?? [];
+      return msgs
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({ role: m.role as "user" | "assistant", text: m.text ?? "" }))
         .filter((m) => m.text.trim());
