@@ -165,15 +165,20 @@ function requireMeta(agentId: string) {
 async function zeaburSendMessage(
   port: number, token: string, sessionId: string, message: string
 ): Promise<MessageResult> {
-  // In Zeabur mode, port is ignored — we look up serviceId from token match or use port as serviceId
-  // The caller should pass serviceId as the agentId context; we use sendRequest directly
-  // For broadcast compatibility, we accept port/token and find the right service
-  const services = await zeabur.listAgentServices();
+  // Find serviceId from agentMap by matching token+port
+  const { getAgentMeta } = await import("./agentDiscovery");
+  // agentMap is module-level — scan all known agents
+  // We don't have direct access to the map, but getAgentMeta takes agentId.
+  // Instead, fall back to scanning services by resolved token.
   let serviceId: string | null = null;
+  const services = await zeabur.listAgentServices();
   for (const svc of services) {
     try {
       const vars = await zeabur.getServiceVariables(svc.serviceId);
-      if (vars.OPENCLAW_GATEWAY_TOKEN === token) { serviceId = svc.serviceId; break; }
+      const raw = vars.OPENCLAW_GATEWAY_TOKEN ?? "";
+      const match = raw.match(/^\$\{(.+)\}$/);
+      const resolvedToken = match ? (vars[match[1]] ?? vars.PASSWORD ?? "") : (raw || vars.PASSWORD || "");
+      if (resolvedToken === token) { serviceId = svc.serviceId; break; }
     } catch { /* skip */ }
   }
   if (!serviceId) throw new Error("Could not find service matching gateway token");
@@ -181,7 +186,7 @@ async function zeaburSendMessage(
   const result = await sendRequest<{
     payloads?: { text?: string }[];
     meta?: { durationMs?: number; agentMeta?: { provider?: string; model?: string } };
-  }>(serviceId, 8080, token, "chat.send", { sessionId, message }, 120000);
+  }>(serviceId, port, token, "chat.send", { sessionId, message }, 120000);
 
   const rawPayloads = result.payloads ?? [];
   const meta = result.meta?.agentMeta;
