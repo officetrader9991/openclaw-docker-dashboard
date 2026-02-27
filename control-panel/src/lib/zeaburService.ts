@@ -98,7 +98,7 @@ export async function createAgentService(
 ): Promise<{ serviceId: string }> {
   const data = await gql<{ service: { _id: string } }>(
     `mutation ($projectId: ObjectID!, $name: String!) {
-      service: createService(projectID: $projectId, template: "PREBUILT", name: $name) {
+      service: createService(projectID: $projectId, template: "PREBUILT_V2", name: $name) {
         _id
       }
     }`,
@@ -219,6 +219,18 @@ export function getInternalUrl(serviceId: string, port: number): string {
   return `http://service-${serviceId}:${port}`;
 }
 
+export async function updateServicePorts(
+  serviceId: string,
+  ports: { id: string; port: number; type: "HTTP" | "TCP" | "UDP" }[]
+): Promise<void> {
+  await gql(
+    `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!, $ports: [ServiceSpecPortInput!]!) {
+      updateServicePorts(serviceID: $serviceId, environmentID: $environmentId, ports: $ports)
+    }`,
+    { serviceId, environmentId: getEnvironmentId(), ports }
+  );
+}
+
 export async function deployService(
   serviceId: string,
   source: {
@@ -237,10 +249,12 @@ export async function deployService(
 
   if (source.type === "DOCKER_IMAGE" && source.dockerImage) {
     await gql(
-      `mutation ($serviceId: ObjectID!, $environmentId: ObjectID!, $image: String!) {
-        deployDockerImage(serviceID: $serviceId, environmentID: $environmentId, image: $image)
+      `mutation ($serviceId: ObjectID!, $specification: DeploymentSpecification!) {
+        deployFromSpecification(serviceID: $serviceId, specification: $specification) {
+          deploymentID
+        }
       }`,
-      { serviceId, environmentId: getEnvironmentId(), image: source.dockerImage }
+      { serviceId, specification: { source: { image: source.dockerImage } } }
     );
   }
 }

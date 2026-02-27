@@ -127,27 +127,37 @@ async function createAgentZeabur(name: string, input: CreateAgentInput): Promise
     const serviceName = `OpenClaw-${String(num).padStart(3, "0")}`;
     const gatewayToken = crypto.randomUUID();
 
-    // Create service with env vars
+    // Create service with env vars matching OpenClaw-001 setup
     const envVars: Record<string, string> = {
-      PORT: "8080",
-      OPENCLAW_GATEWAY_TOKEN: gatewayToken,
+      PASSWORD: gatewayToken,
+      OPENCLAW_GATEWAY_TOKEN: "${PASSWORD}",
       OPENCLAW_GATEWAY_BIND: "lan",
+      OPENCLAW_GATEWAY_PORT: "18789",
       OPENCLAW_DISABLE_BONJOUR: "1",
+      OPENCLAW_TELEGRAM_DISABLE_AUTO_SELECT_FAMILY: "true",
+      NODE_OPTIONS: "--max-old-space-size=1024",
+      NODE_ENV: "production",
+      OPENCLAW_STATE_DIR: "/home/node/.openclaw",
+      OPENCLAW_WORKSPACE_DIR: "/home/node/.openclaw/workspace",
     };
 
     // Copy provider keys from dashboard env if available
     if (process.env.YUNYI_API_KEY) envVars.YUNYI_API_KEY = process.env.YUNYI_API_KEY;
     if (process.env.MINIMAX_API_KEY) envVars.MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
+    if (process.env.ZEABUR_AI_HUB_API_KEY) envVars.ZEABUR_AI_HUB_API_KEY = process.env.ZEABUR_AI_HUB_API_KEY;
 
     const { serviceId } = await zeabur.createAgentService(serviceName, envVars);
 
-    // Deploy using the agent Dockerfile pattern
+    // Set port 18789 as HTTP
+    await zeabur.updateServicePorts(serviceId, [{ id: "web", port: 18789, type: "HTTP" }]);
+
+    // Deploy using the official OpenClaw image
     await zeabur.deployService(serviceId, {
       type: "DOCKER_IMAGE",
-      dockerImage: "node:22-slim",
+      dockerImage: "ghcr.io/openclaw/openclaw:latest",
     });
 
-    // Wait for service to be ready, then write identity files
+    // Best-effort write identity after a short delay for service to start
     const vibe = input.vibe || pickRandom(RANDOM_VIBES);
     const interests = input.interests || pickRandom(RANDOM_INTERESTS);
     const emoji = input.emoji || "";
@@ -162,16 +172,15 @@ async function createAgentZeabur(name: string, input: CreateAgentInput): Promise
       purpose ? `- **Purpose:** ${purpose}` : null,
     ].filter(Boolean).join("\n");
 
-    // Best-effort write identity — service may not be ready yet
     try {
       await zeabur.executeCommand(serviceId, [
         "sh", "-c",
-        `mkdir -p /home/openclaw/.openclaw/workspace && cat > /home/openclaw/.openclaw/workspace/IDENTITY.md << 'IDEOF'\n${identityMd}\nIDEOF`,
+        `mkdir -p /home/node/.openclaw/workspace && printf '%s' '${identityMd.replace(/'/g, "'\\''")}' > /home/node/.openclaw/workspace/IDENTITY.md`,
       ]);
-    } catch { /* will be written when service is healthy */ }
+    } catch { /* service may not be ready yet — identity can be set later */ }
 
     zeabur.invalidateServiceCache();
-    return { agentId: serviceName, name, port: 8080, success: true };
+    return { agentId: serviceName, name, port: 18789, success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { agentId: "unknown", name, port: 0, success: false, error: msg };
