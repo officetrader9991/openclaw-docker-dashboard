@@ -291,6 +291,47 @@ async function installMoltbookSkill(agentId) {
   }
 }
 
+// ─── Startup Readiness + Docker Watchdog ─────────────────
+
+let dockerReady = false;
+let dockerLastCheck = 0;
+let dockerLastOk = false;
+const DOCKER_CHECK_INTERVAL = 60_000;
+
+async function checkDocker() {
+  try {
+    await run("docker info", { timeout: 10000 });
+    dockerLastOk = true;
+    return true;
+  } catch {
+    dockerLastOk = false;
+    return false;
+  }
+}
+
+async function waitForDocker(maxWaitMs = 120_000) {
+  const deadline = Date.now() + maxWaitMs;
+  console.log("[Relay] Waiting for Docker daemon...");
+  while (Date.now() < deadline) {
+    if (await checkDocker()) {
+      console.log("[Relay] Docker daemon is reachable.");
+      dockerReady = true;
+      return true;
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  console.error("[Relay] Docker daemon not reachable after " + (maxWaitMs / 1000) + "s — starting anyway.");
+  dockerReady = true;
+  return false;
+}
+
+const dockerWatchdog = setInterval(async () => {
+  const ok = await checkDocker();
+  dockerLastCheck = Date.now();
+  if (!ok) console.warn(`[Relay] Docker health check FAILED at ${new Date().toISOString()}`);
+}, DOCKER_CHECK_INTERVAL);
+dockerWatchdog.unref();
+
 // ─── Express App ────────────────────────────────────────
 
 const app = express();
@@ -299,6 +340,26 @@ app.use(express.json({ limit: "5mb" }));
 
 app.use((req, _res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
+
+// Request timeout: abort hung requests after 120s
+app.use((req, res, next) => {
+  const timer = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: "Request timed out (120s)" });
+    }
+  }, 120_000);
+  res.on("close", () => clearTimeout(timer));
+  next();
+});
+
+// Readiness gate: reject requests (except /api/health) until Docker is confirmed
+app.use((req, res, next) => {
+  if (req.path === "/api/health") return next();
+  if (!dockerReady) {
+    return res.status(503).json({ error: "Relay starting up — waiting for Docker daemon" });
+  }
   next();
 });
 
@@ -315,7 +376,13 @@ app.use((req, res, next) => {
 // ─── 1. Health ──────────────────────────────────────────
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    dockerReady,
+    dockerLastOk,
+    dockerLastCheckAgo: dockerLastCheck ? Date.now() - dockerLastCheck : null,
+    uptime: Math.floor(process.uptime()),
+  });
 });
 
 // ─── 2. Fleet Overview ──────────────────────────────────
@@ -717,9 +784,43 @@ app.post("/api/agents/create", async (req, res) => {
 
 // ─── Start Server ───────────────────────────────────────
 
-app.listen(RELAY_PORT, () => {
-  console.log(`[Relay] Listening on port ${RELAY_PORT}`);
-  console.log(`[Relay] Fleet root: ${FLEET_ROOT}`);
-  console.log(`[Relay] Agents dir: ${AGENTS_DIR}`);
-  console.log(`[Relay] Auth: ${RELAY_API_KEY ? "enabled" : "disabled (no RELAY_API_KEY set)"}`);
+let server;
+
+async function start() {
+  await waitForDocker();
+  server = app.listen(RELAY_PORT, () => {
+    console.log(`[Relay] Listening on port ${RELAY_PORT}`);
+    console.log(`[Relay] Fleet root: ${FLEET_ROOT}`);
+    console.log(`[Relay] Agents dir: ${AGENTS_DIR}`);
+    console.log(`[Relay] Auth: ${RELAY_API_KEY ? "enabled" : "disabled (no RELAY_API_KEY set)"}`);
+  });
+}
+
+function shutdown(signal) {
+  console.log(`[Relay] Received ${signal}, shutting down gracefully...`);
+  clearInterval(dockerWatchdog);
+  if (server) {
+    server.close(() => {
+      console.log("[Relay] HTTP server closed.");
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.warn("[Relay] Forceful shutdown after 10s timeout.");
+      process.exit(1);
+    }, 10000).unref();
+  } else {
+    process.exit(0);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+process.on("uncaughtException", (err) => {
+  console.error("[Relay] Uncaught exception:", err);
 });
+process.on("unhandledRejection", (reason) => {
+  console.error("[Relay] Unhandled rejection:", reason);
+});
+
+start();
