@@ -385,7 +385,7 @@ export async function registerOnMoltbook(
   try {
     const { stdout } = await execAsync(
       `cd "${FLEET_ROOT}" && bash "${registerScript}" --agent ${agentId} ${nameFlag}`,
-      { timeout: 30000, ...EXEC_OPTS }
+      { timeout: 30000, env: EXEC_ENV }
     );
 
     const claimMatch = stdout.match(/Claim URL:\s+(https:\/\/\S+)/);
