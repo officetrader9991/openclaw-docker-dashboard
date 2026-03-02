@@ -97,10 +97,19 @@ export interface CreateAgentResult {
 
 async function createAgentRelay(name: string, input: CreateAgentInput): Promise<CreateAgentResult> {
   try {
-    const res = await relayPost<{ created: CreateAgentResult[]; failed: CreateAgentResult[] }>("/api/agents/create", {
+    interface RelayCreated { agentId: string; name: string; port: number }
+    interface RelayFailed { index: number; error: string }
+    const res = await relayPost<{ created: RelayCreated[]; failed: RelayFailed[] }>("/api/agents/create", {
       count: 1, name, ...input,
     }, 60000);
-    return res.created[0] ?? res.failed[0] ?? { agentId: "unknown", name, port: 0, success: false, error: "No result" };
+    if (res.created[0]) {
+      const c = res.created[0];
+      return { agentId: c.agentId, name: c.name, port: c.port, success: true };
+    }
+    if (res.failed[0]) {
+      return { agentId: "unknown", name, port: 0, success: false, error: res.failed[0].error };
+    }
+    return { agentId: "unknown", name, port: 0, success: false, error: "No result from relay" };
   } catch (err) {
     return { agentId: "unknown", name, port: 0, success: false, error: err instanceof Error ? err.message : String(err) };
   }

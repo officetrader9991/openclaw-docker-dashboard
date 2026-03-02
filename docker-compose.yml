@@ -50,3 +50,37 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+  agent-04:
+    image: openclaw-fleet:latest
+    build: .
+    container_name: openclaw-agent-04
+    volumes:
+      - ./agents/agent-04:/home/openclaw/.openclaw
+    ports:
+      - "18704:18704"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "openclaw", "gateway", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+  agent-05:
+    image: openclaw-fleet:latest
+    build: .
+    container_name: openclaw-agent-05
+    volumes:
+      - ./agents/agent-05:/home/openclaw/.openclaw
+    ports:
+      - "18705:18705"
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "openclaw", "gateway", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
